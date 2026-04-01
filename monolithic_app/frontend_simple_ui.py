@@ -12,20 +12,15 @@ from typing import Any, Dict, Optional, List, Iterator, Tuple
 import pandas as pd
 import streamlit as st
 
+
+
+
 # -----------------------------
 # Import your compiled LangGraph app
 # -----------------------------
 from backend import app
 
-HISTORY_FILE = "history.json"
 
-def load_history():
-    if Path(HISTORY_FILE).exists():
-        return json.loads(Path(HISTORY_FILE).read_text())
-    return []
-
-def save_history(data):
-    Path(HISTORY_FILE).write_text(json.dumps(data))
 # -----------------------------
 # Helpers
 # -----------------------------
@@ -95,6 +90,11 @@ def extract_latest_state(current_state: Dict[str, Any], step_payload: Any) -> Di
             current_state.update(step_payload)
     return current_state
 
+def save_markdown(md_text: str, title: str) -> Path:
+    filename = f"{safe_slug(title)}.md"
+    filepath = BLOG_DIR / filename
+    filepath.write_text(md_text, encoding="utf-8")
+    return filepath
 
 # -----------------------------
 # Markdown renderer that supports local images
@@ -172,7 +172,9 @@ def list_past_blogs() -> List[Path]:
     Returns .md files in current working directory, newest first.
     Filters out obvious non-blog markdown files if needed.
     """
-    cwd = Path(".")
+    BLOG_DIR = Path("blogs")
+    BLOG_DIR.mkdir(exist_ok=True)
+    cwd = Path("./blogs")  # Change to BLOG_DIR if you want to look in a specific folder
     files = [p for p in cwd.glob("*.md") if p.is_file()]
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return files
@@ -250,7 +252,7 @@ def add_bg_image():
         f"""
         <style>
         .stApp {{
-            background-image: url("https://png.pngtree.com/background/20210711/original/pngtree-geometric-abstract-background-with-blogs-picture-image_1166618.jpg");
+            background-image: url("https://img.freepik.com/free-vector/abstract-blue-light-pipe-speed-zoom-black-background-technology_1142-9980.jpg?semt=ais_incoming&w=740&q=80");
             background-size: cover;
             background-attachment: fixed;
         }}
@@ -294,22 +296,24 @@ with st.sidebar:
     st.divider()
     st.subheader("Past blogs")
 
-    st.subheader("📂 Blog History")
+    past_files = list_past_blogs()
+    if not past_files:
+        st.caption("No saved blogs found (*.md in current folder).")
+        selected_md_file = None
+    else:
+        # Build labels from file name + (optional) parsed title
+        options: List[str] = []
+        file_by_label: Dict[str, Path] = {}
+        for p in past_files[:50]:
+            try:
+                md_text = read_md_file(p)
+                title = extract_title_from_md(md_text, p.stem)
+            except Exception:
+                title = p.stem
+            label = f"{title}  ·  {p.name}"
+            options.append(label)
+            file_by_label[label] = p
 
-history = st.session_state["history"]
-
-if not history:
-    st.caption("No blogs generated yet.")
-else:
-    for i, item in enumerate(history[::-1]):
-        title = (
-            item.get("plan", {}).get("blog_title")
-            if item.get("plan")
-            else f"Blog {len(history)-i}"
-        )
-
-        if st.button(title, key=f"hist_{i}"):
-            st.session_state["current_index"] = len(history) - 1 - i
         selected_label = st.radio(
             "Select a blog to load",
             options=options,
@@ -339,19 +343,13 @@ if "topic_prefill" in st.session_state and isinstance(st.session_state["topic_pr
     pass
 
 # Storage for latest run
-if "history" not in st.session_state:
-    st.session_state["history"] = load_history()
-
-if "current_index" not in st.session_state:
-    st.session_state["current_index"] = None
+if "last_out" not in st.session_state:
+    st.session_state["last_out"] = None
 
 # Layout
-left, right = st.columns([1, 2])
-
-with right:
-    tab_plan, tab_evidence, tab_preview, tab_images, tab_logs = st.tabs(
-        ["🧠 Plan", "📚 Research", "📝 Preview", "🖼️ Media", "📜 Logs"]
-    )
+tab_plan, tab_evidence, tab_preview, tab_images, tab_logs = st.tabs(
+    ["🧠 Plan", "📚 Research", "📝 Preview", "🖼️ Media", "📜 Logs"]
+)
 
 logs: List[str] = []
 
@@ -360,88 +358,83 @@ def log(msg: str):
     logs.append(msg)
 
 
-with left:
-    st.subheader("💬 Chat")
+if run_btn:
+    if not topic.strip():
+        st.warning("Please enter a topic.")
+        st.stop()
 
-    if "chat" not in st.session_state:
-        st.session_state["chat"] = []
+    inputs: Dict[str, Any] = {
+        "topic": topic.strip(),
+        "mode": "",
+        "needs_research": False,
+        "queries": [],
+        "evidence": [],
+        "plan": None,
+        "as_of": as_of.isoformat(),
+        "recency_days": 7,
+        "sections": [],
+        "merged_md": "",
+        "md_with_placeholders": "",
+        "image_specs": [],
+        "final": "",
+    }
 
-    # show chat history
-    for msg in st.session_state["chat"]:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    status = st.status("Running graph…", expanded=True)
+    progress_area = st.empty()
 
-    user_input = st.chat_input("Enter topic...")
+    current_state: Dict[str, Any] = {}
+    last_node = None
 
-    if user_input:
-        st.session_state["chat"].append({"role": "user", "content": user_input})
+    for kind, payload in try_stream(app, inputs):
+        if kind in ("updates", "values"):
+            node_name = None
+            if isinstance(payload, dict) and len(payload) == 1 and isinstance(next(iter(payload.values())), dict):
+                node_name = next(iter(payload.keys()))
+            if node_name and node_name != last_node:
+                status.write(f"➡️ Node: `{node_name}`")
+                last_node = node_name
 
-        with st.chat_message("user"):
-            st.markdown(user_input)
+            current_state = extract_latest_state(current_state, payload)
 
-        with st.chat_message("assistant"):
-            placeholder = st.empty()
-            thinking = st.empty()
-
-            inputs = {
-                "topic": user_input.strip(),
-                "mode": "",
-                "needs_research": False,
-                "queries": [],
-                "evidence": [],
-                "plan": None,
-                "as_of": date.today().isoformat(),
-                "recency_days": 7,
-                "sections": [],
-                "merged_md": "",
-                "md_with_placeholders": "",
-                "image_specs": [],
-                "final": "",
+            summary = {
+                "mode": current_state.get("mode"),
+                "needs_research": current_state.get("needs_research"),
+                "queries": current_state.get("queries", [])[:5] if isinstance(current_state.get("queries"), list) else [],
+                "evidence_count": len(current_state.get("evidence", []) or []),
+                "tasks": len((current_state.get("plan") or {}).get("tasks", [])) if isinstance(current_state.get("plan"), dict) else None,
+                "images": len(current_state.get("image_specs", []) or []),
+                "sections_done": len(current_state.get("sections", []) or []),
             }
+            progress_area.json(summary)
 
-            current_state = {}
-            text = ""
+            log(f"[{kind}] {json.dumps(payload, default=str)[:1200]}")
 
-            for kind, payload in try_stream(app, inputs):
+        elif kind == "final":
+            out = payload
+            st.session_state["last_out"] = out
+            status.update(label="✅ Done", state="complete", expanded=False)
+            log("[final] received final state")
 
-                if kind in ("updates", "values"):
-                    current_state = extract_latest_state(current_state, payload)
+            # -----------------------------
+            # 💾 SAVE MARKDOWN FILE HERE
+            # -----------------------------
+            final = out.get("final", "")
 
-                    if current_state.get("plan"):
-                        thinking.markdown("🧠 Planning...")
-                    elif current_state.get("evidence"):
-                        thinking.markdown("🔎 Research...")
-                    elif current_state.get("sections"):
-                        thinking.markdown("✍️ Writing...")
+            plan = out.get("plan")
 
-                elif kind == "final":
-                    thinking.empty()
-                    final_md = payload.get("final", "")
+            if isinstance(plan, dict):
+                title = plan.get("blog_title", "blog")
+            elif hasattr(plan, "blog_title"):
+                title = plan.blog_title
+            else:
+                title = "blog"
 
-                    for ch in final_md:
-                        text += ch
-                        placeholder.markdown(text + "▌")
-                        time.sleep(0.001)
+            saved_path = save_markdown(final, title)
 
-                    placeholder.markdown(text)
-
-                    st.session_state["chat"].append({
-                        "role": "assistant",
-                        "content": final_md
-                    })
-
-                    # 🔥 SAVE TO HISTORY
-                    st.session_state["history"].append(payload)
-                    save_history(st.session_state["history"])
-
-                    # 🔥 UPDATE CURRENT VIEW
-                    st.session_state["current_index"] = len(st.session_state["history"]) - 1
+            st.success(f"Saved to: {saved_path}")
 
 # Render last result (if any)
-idx = st.session_state.get("current_index")
-history = st.session_state["history"]
-
-out = history[idx] if idx is not None and idx < len(history) else None
+out = st.session_state.get("last_out")
 if out:
     # --- Plan tab ---
     with tab_plan:

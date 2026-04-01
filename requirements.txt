@@ -11,4 +11,9 @@ google-genai
 annotated-types
 langchain-google-genai
 langchain-tavily
-
+fastapi
+uvicorn
+pandas
+httpx
+tenacity
+boto3

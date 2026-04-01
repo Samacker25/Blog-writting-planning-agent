@@ -1,0 +1,8 @@
+images/
+blogs/
+frontend/
+backend/
+__pycache__/
+*.pyc
+.env
+.git
